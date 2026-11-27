@@ -80,10 +80,13 @@ async function evolutionRequest(endpointPath, { method = 'GET', body } = {}) {
   try {
     response = await fetch(url, fetchOptions);
   } catch (error) {
+    const causeErrors = Array.isArray(error?.cause?.errors)
+      ? error.cause.errors.map((e) => e.code || e.message).filter(Boolean).join(', ')
+      : '';
     const reason =
       error?.name === 'TimeoutError'
         ? `tempo limite excedido (${REQUEST_TIMEOUT_MS / 1000}s)`
-        : error?.cause?.code || error?.message || 'falha de rede';
+        : error?.cause?.code || causeErrors || error?.message || 'falha de rede';
 
     throw new EvolutionApiError(
       `Não foi possível se comunicar com a Evolution API em ${env.evolution.apiUrl} (${reason}).`,
@@ -192,4 +195,37 @@ export async function getInstanceStatus(instanceName) {
     connected: state === 'open',
     raw: data,
   };
+}
+
+/**
+ * Lista instâncias cadastradas atualmente na Evolution API v2.
+ * Retorna array vazio caso a Evolution API esteja offline ou indisponível.
+ */
+export async function listEvolutionInstances() {
+  try {
+    const data = await evolutionRequest('/instance/fetchInstances', {
+      method: 'GET',
+    });
+
+    if (!Array.isArray(data)) {
+      return [];
+    }
+
+    return data
+      .map((item) => {
+        const name = item?.name || item?.instance?.instanceName || item?.instanceName;
+        const state = item?.connectionStatus || item?.instance?.state || item?.state || 'unknown';
+        if (typeof name !== 'string' || !name.trim()) {
+          return null;
+        }
+        return {
+          instanceName: name.trim(),
+          state,
+          connected: state === 'open',
+        };
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }

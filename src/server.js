@@ -3,12 +3,32 @@ import express from 'express';
 import { checkConnection, pool } from './config/database.js';
 import { env } from './config/env.js';
 import { router } from './routes/index.js';
+import { closeAllSseConnections } from './services/sseService.js';
 import { formatError, logError, logInfo, logWarn } from './services/terminalLogger.js';
 
 const app = express();
 
+const allowedOrigins = new Set([
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  ...(process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map((item) => item.trim()).filter(Boolean)
+    : []),
+]);
+
 // Middlewares globais
-app.use(cors());
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin) || /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }),
+);
 app.use(express.json({ limit: '15mb' }));
 
 // Tratamento de JSON malformado ou payload acima do limite sem derrubar a aplicação
@@ -44,7 +64,8 @@ const server = app.listen(env.port, async () => {
   logInfo('Server', `PoC Jurídico Backend rodando em http://localhost:${env.port}`);
   logInfo('Server', `Webhook Evolution API: POST http://localhost:${env.port}/webhook`);
   logInfo('Server', `Healthcheck:           GET  http://localhost:${env.port}/health`);
-  logInfo('Server', `Instâncias (Evolution): POST http://localhost:${env.port}/instances`);
+  logInfo('Server', `API Monitoramento:     GET  http://localhost:${env.port}/api/conversations`);
+  logInfo('Server', `Stream Tempo Real SSE: GET  http://localhost:${env.port}/api/events`);
   logInfo('Server', `QR Code (Navegador):   GET  http://localhost:${env.port}/instances/:name/qrcode`);
 
   try {
@@ -65,6 +86,7 @@ async function shutdown(signal) {
   isShuttingDown = true;
 
   logInfo('Server', `Sinal ${signal} recebido. Encerrando servidor com segurança...`);
+  closeAllSseConnections();
 
   server.close(async () => {
     try {

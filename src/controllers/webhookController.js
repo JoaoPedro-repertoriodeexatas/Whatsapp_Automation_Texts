@@ -4,6 +4,10 @@ import {
 } from '../services/evolutionParser.js';
 import { saveMessage } from '../services/messageService.js';
 import {
+  broadcastConnectionUpdate,
+  broadcastNewMessage,
+} from '../services/sseService.js';
+import {
   logError,
   logIncomingMessage,
   logInfo,
@@ -12,11 +16,19 @@ import {
 
 async function processWebhookPayload(payload) {
   try {
-    // Loga transições de conexão (open/connecting/close) para acompanhar pareamento no terminal
+    // Loga e retransmite transições de conexão (open/connecting/close) via SSE
     const connUpdate = parseConnectionUpdate(payload);
     if (connUpdate) {
       const reason = connUpdate.statusReason != null ? ` (motivo: ${connUpdate.statusReason})` : '';
       logInfo('Evolution', `[${connUpdate.instancia}] Estado da conexão: ${connUpdate.state}${reason}`);
+
+      broadcastConnectionUpdate({
+        instanceName: connUpdate.instancia,
+        state: connUpdate.state,
+        connected: connUpdate.state === 'open',
+        statusReason: connUpdate.statusReason,
+        timestamp: new Date().toISOString(),
+      });
       return;
     }
 
@@ -33,6 +45,12 @@ async function processWebhookPayload(payload) {
         const result = await saveMessage(message);
         if (!result.inserted) {
           logWarn('DB', `Mensagem duplicada ignorada (idempotência): ${message.message_id}`);
+          continue;
+        }
+
+        // Dispara SSE apenas quando a mensagem foi efetivamente persistida (idempotência)
+        if (result.record) {
+          broadcastNewMessage(result.record);
         }
       } catch (dbError) {
         logError(
