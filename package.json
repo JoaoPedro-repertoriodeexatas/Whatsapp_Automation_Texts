@@ -1,0 +1,22 @@
+{
+  "name": "poc-juridico-whatsapp-backend",
+  "version": "1.0.0",
+  "description": "Backend PoC para espelhamento e monitoramento local de conversas WhatsApp via Evolution API v2 e PostgreSQL",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "db:setup": "node src/database/setup.js",
+    "test:webhook": "node scripts/test-webhook.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}

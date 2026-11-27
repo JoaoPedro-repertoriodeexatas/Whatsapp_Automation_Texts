@@ -1,0 +1,12 @@
+# Dependências
+node_modules/
+
+# Variáveis de ambiente locais
+.env
+.env.local
+
+# Logs e temporários
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
