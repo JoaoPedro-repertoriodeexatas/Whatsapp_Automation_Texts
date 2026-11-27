@@ -9,13 +9,17 @@ const app = express();
 
 // Middlewares globais
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '15mb' }));
 
-// Tratamento de JSON malformado no body sem derrubar a aplicação
+// Tratamento de JSON malformado ou payload acima do limite sem derrubar a aplicação
 app.use((err, _req, res, next) => {
   if (err?.type === 'entity.parse.failed') {
     logWarn('HTTP', `Payload JSON inválido recebido: ${err.message}`);
     return res.status(400).json({ error: 'JSON inválido no corpo da requisição.' });
+  }
+  if (err?.type === 'entity.too.large') {
+    logWarn('HTTP', 'Payload excedeu o limite máximo configurado (15mb).');
+    return res.status(413).json({ error: 'Payload excedeu o limite máximo permitido.' });
   }
   return next(err);
 });
@@ -40,6 +44,8 @@ const server = app.listen(env.port, async () => {
   logInfo('Server', `PoC Jurídico Backend rodando em http://localhost:${env.port}`);
   logInfo('Server', `Webhook Evolution API: POST http://localhost:${env.port}/webhook`);
   logInfo('Server', `Healthcheck:           GET  http://localhost:${env.port}/health`);
+  logInfo('Server', `Instâncias (Evolution): POST http://localhost:${env.port}/instances`);
+  logInfo('Server', `QR Code (Navegador):   GET  http://localhost:${env.port}/instances/:name/qrcode`);
 
   try {
     const db = await checkConnection();
@@ -52,7 +58,12 @@ const server = app.listen(env.port, async () => {
   }
 });
 
+let isShuttingDown = false;
+
 async function shutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
   logInfo('Server', `Sinal ${signal} recebido. Encerrando servidor com segurança...`);
 
   server.close(async () => {
@@ -69,3 +80,6 @@ async function shutdown(signal) {
 
 process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('unhandledRejection', (reason) => {
+  logError('Process', 'Promise rejeitada sem tratamento capturada', reason);
+});

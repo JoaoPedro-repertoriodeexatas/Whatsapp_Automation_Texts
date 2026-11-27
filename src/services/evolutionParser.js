@@ -1,6 +1,8 @@
 /**
  * Parser e normalizador de payloads de webhook da Evolution API v2.
- * Focado no evento `messages.upsert`, ignorando status, broadcasts e mensagens de protocolo.
+ * - Aceita `messages.upsert` e variações de caixa/separador (`MESSAGES_UPSERT`).
+ * - Mantém apenas conversas individuais (`@s.whatsapp.net`), ignorando `status@broadcast`,
+ *   grupos (`@g.us`), canais (`@newsletter`) e mensagens de protocolo/recibo.
  */
 
 const IGNORED_MESSAGE_KEYS = new Set([
@@ -17,9 +19,19 @@ const IGNORED_MESSAGE_KEYS = new Set([
   'bcallMessage',
 ]);
 
-function normalizeEventName(event) {
+export function normalizeEventName(event) {
   if (typeof event !== 'string') return '';
   return event.trim().toLowerCase().replace(/_/g, '.');
+}
+
+function stripNullBytes(value) {
+  if (typeof value !== 'string') return '';
+  // PostgreSQL TEXT/VARCHAR rejeita byte nulo (0x00)
+  return value.replace(/\u0000/g, '');
+}
+
+function safeTrim(value) {
+  return typeof value === 'string' ? stripNullBytes(value).trim() : '';
 }
 
 function unwrapMessage(rawMessage) {
@@ -28,7 +40,7 @@ function unwrapMessage(rawMessage) {
   let current = rawMessage;
   let guard = 0;
 
-  while (current && typeof current === 'object' && guard < 5) {
+  while (current && typeof current === 'object' && guard < 6) {
     guard += 1;
 
     if (current.ephemeralMessage?.message) {
@@ -55,6 +67,10 @@ function unwrapMessage(rawMessage) {
       current = current.editedMessage.message;
       continue;
     }
+    if (current.protocolMessage?.editedMessage) {
+      current = current.protocolMessage.editedMessage;
+      continue;
+    }
     break;
   }
 
@@ -62,25 +78,39 @@ function unwrapMessage(rawMessage) {
 }
 
 function extractCleanPhone(key) {
-  const rawJid =
-    (typeof key?.remoteJid === 'string' && key.remoteJid.endsWith('@lid') && key.remoteJidAlt)
-      ? key.remoteJidAlt
-      : key?.remoteJid;
+  const remoteJid = typeof key?.remoteJid === 'string' ? key.remoteJid.trim() : '';
+  const remoteJidAlt = typeof key?.remoteJidAlt === 'string' ? key.remoteJidAlt.trim() : '';
 
-  if (typeof rawJid !== 'string' || !rawJid.trim()) {
+  // Em contas mais recentes do WhatsApp (LID), usa remoteJidAlt quando trouxer o JID @s.whatsapp.net
+  const resolvedJid =
+    remoteJid.endsWith('@lid') && remoteJidAlt.endsWith('@s.whatsapp.net')
+      ? remoteJidAlt
+      : remoteJid;
+
+  if (!resolvedJid) {
     return null;
   }
 
-  const trimmed = rawJid.trim();
+  const lowerJid = resolvedJid.toLowerCase();
 
-  // Ignora status do WhatsApp e listas de transmissão
-  if (trimmed === 'status@broadcast' || trimmed.endsWith('@broadcast')) {
+  // Ignora explicitamente status, listas de transmissão, grupos e canais
+  if (
+    lowerJid === 'status@broadcast' ||
+    lowerJid.endsWith('@broadcast') ||
+    lowerJid.endsWith('@g.us') ||
+    lowerJid.endsWith('@newsletter')
+  ) {
     return null;
   }
 
-  // Remove sufixos como @s.whatsapp.net, @c.us, @g.us e identificadores de dispositivo (:12)
-  const beforeAt = trimmed.split('@')[0];
-  const cleanNumber = beforeAt.split(':')[0].trim();
+  // Para esta PoC jurídica, mantém estritamente conversas individuais (@s.whatsapp.net)
+  if (!lowerJid.endsWith('@s.whatsapp.net')) {
+    return null;
+  }
+
+  // Remove sufixo @s.whatsapp.net e eventual identificador de dispositivo (:12)
+  const beforeAt = resolvedJid.split('@')[0];
+  const cleanNumber = stripNullBytes(beforeAt.split(':')[0]).trim();
 
   return cleanNumber || null;
 }
@@ -117,27 +147,36 @@ function extractContent(messageObj) {
   }
 
   // 1. Texto simples
-  if (typeof msg.conversation === 'string' && msg.conversation.trim() !== '') {
-    return {
-      tipo_mensagem: 'texto',
-      conteudo: msg.conversation,
-    };
+  if (typeof msg.conversation === 'string') {
+    const text = stripNullBytes(msg.conversation);
+    if (text.trim() !== '') {
+      return {
+        tipo_mensagem: 'texto',
+        conteudo: text,
+      };
+    }
   }
 
   // 2. Texto estendido (respostas, links, formatação)
-  if (typeof msg.extendedTextMessage?.text === 'string' && msg.extendedTextMessage.text.trim() !== '') {
-    return {
-      tipo_mensagem: 'texto',
-      conteudo: msg.extendedTextMessage.text,
-    };
+  if (typeof msg.extendedTextMessage?.text === 'string') {
+    const text = stripNullBytes(msg.extendedTextMessage.text);
+    if (text.trim() !== '') {
+      return {
+        tipo_mensagem: 'texto',
+        conteudo: text,
+      };
+    }
   }
 
   // 3. Documentos / PDFs
-  if (msg.documentMessage) {
+  if (msg.documentMessage && typeof msg.documentMessage === 'object') {
     // TODO Fase 2: download e upload para S3/MinIO
-    const fileName = msg.documentMessage.fileName || msg.documentMessage.title || 'documento_sem_nome';
-    const mimetype = msg.documentMessage.mimetype || 'application/octet-stream';
-    const caption = msg.documentMessage.caption?.trim();
+    const fileName =
+      safeTrim(msg.documentMessage.fileName) ||
+      safeTrim(msg.documentMessage.title) ||
+      'documento_sem_nome';
+    const mimetype = safeTrim(msg.documentMessage.mimetype) || 'application/octet-stream';
+    const caption = safeTrim(msg.documentMessage.caption);
 
     const metadata = `${fileName} (${mimetype})`;
     return {
@@ -147,9 +186,9 @@ function extractContent(messageObj) {
   }
 
   // 4. Imagens
-  if (msg.imageMessage) {
+  if (msg.imageMessage && typeof msg.imageMessage === 'object') {
     // TODO Fase 2: download e upload para S3/MinIO
-    const caption = msg.imageMessage.caption?.trim();
+    const caption = safeTrim(msg.imageMessage.caption);
     return {
       tipo_mensagem: 'imagem',
       conteudo: caption ? `[Imagem] ${caption}` : '[Imagem sem legenda]',
@@ -157,7 +196,7 @@ function extractContent(messageObj) {
   }
 
   // 5. Áudios / mensagens de voz
-  if (msg.audioMessage) {
+  if (msg.audioMessage && typeof msg.audioMessage === 'object') {
     // TODO Fase 2: download e upload para S3/MinIO
     const seconds = Number(msg.audioMessage.seconds);
     const isVoiceNote = Boolean(msg.audioMessage.ptt);
@@ -171,31 +210,31 @@ function extractContent(messageObj) {
   }
 
   // 6. Outros tipos úteis (vídeo, figurinha, contato, localização)
-  if (msg.videoMessage) {
+  if (msg.videoMessage && typeof msg.videoMessage === 'object') {
     // TODO Fase 2: download e upload para S3/MinIO
-    const caption = msg.videoMessage.caption?.trim();
+    const caption = safeTrim(msg.videoMessage.caption);
     return {
       tipo_mensagem: 'outro',
       conteudo: caption ? `[Vídeo] ${caption}` : '[Vídeo sem legenda]',
     };
   }
 
-  if (msg.stickerMessage) {
+  if (msg.stickerMessage && typeof msg.stickerMessage === 'object') {
     return {
       tipo_mensagem: 'outro',
       conteudo: '[Figurinha]',
     };
   }
 
-  if (msg.contactMessage) {
-    const displayName = msg.contactMessage.displayName || 'Sem nome';
+  if (msg.contactMessage && typeof msg.contactMessage === 'object') {
+    const displayName = safeTrim(msg.contactMessage.displayName) || 'Sem nome';
     return {
       tipo_mensagem: 'outro',
       conteudo: `[Contato compartilhado: ${displayName}]`,
     };
   }
 
-  if (msg.contactsArrayMessage) {
+  if (msg.contactsArrayMessage && typeof msg.contactsArrayMessage === 'object') {
     const total = Array.isArray(msg.contactsArrayMessage.contacts)
       ? msg.contactsArrayMessage.contacts.length
       : 0;
@@ -205,7 +244,10 @@ function extractContent(messageObj) {
     };
   }
 
-  if (msg.locationMessage || msg.liveLocationMessage) {
+  if (
+    (msg.locationMessage && typeof msg.locationMessage === 'object') ||
+    (msg.liveLocationMessage && typeof msg.liveLocationMessage === 'object')
+  ) {
     const loc = msg.locationMessage || msg.liveLocationMessage;
     const coords =
       loc.degreesLatitude != null && loc.degreesLongitude != null
@@ -236,7 +278,7 @@ function parseSingleMessage(item, instanceName) {
     return null;
   }
 
-  const messageId = typeof key.id === 'string' ? key.id.trim() : '';
+  const messageId = safeTrim(key.id);
   if (!messageId) {
     return null;
   }
@@ -251,19 +293,44 @@ function parseSingleMessage(item, instanceName) {
     return null;
   }
 
-  const pushName = typeof item.pushName === 'string' && item.pushName.trim() !== ''
-    ? item.pushName.trim().slice(0, 150)
-    : null;
+  const pushNameClean = safeTrim(item.pushName);
+  const pushName = pushNameClean ? pushNameClean.slice(0, 150) : null;
 
   return {
     message_id: messageId.slice(0, 100),
-    instancia: String(instanceName).trim().slice(0, 50),
+    instancia: safeTrim(instanceName).slice(0, 50),
     telefone_cliente: telefoneCliente.slice(0, 50),
     nome_contato: pushName,
     enviada_por_nos: Boolean(key.fromMe),
     tipo_mensagem: extracted.tipo_mensagem,
     conteudo: extracted.conteudo,
     criado_em: parseTimestamp(item.messageTimestamp),
+  };
+}
+
+/**
+ * Extrai informações de atualização de conexão (`connection.update` / `CONNECTION_UPDATE`)
+ * apenas para log operacional em tempo real no terminal.
+ */
+export function parseConnectionUpdate(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+
+  if (normalizeEventName(payload.event) !== 'connection.update') {
+    return null;
+  }
+
+  const instancia = safeTrim(payload.instance);
+  const state = safeTrim(payload.data?.state || payload.data?.connection);
+  if (!instancia || !state) {
+    return null;
+  }
+
+  return {
+    instancia,
+    state,
+    statusReason: payload.data?.statusReason ?? null,
   };
 }
 
@@ -280,13 +347,13 @@ export function parseEvolutionWebhook(payload) {
     return [];
   }
 
-  const instancia = payload.instance;
-  if (typeof instancia !== 'string' || !instancia.trim()) {
+  const instancia = safeTrim(payload.instance);
+  if (!instancia) {
     return [];
   }
 
   const rawData = payload.data;
-  if (!rawData) {
+  if (!rawData || typeof rawData !== 'object') {
     return [];
   }
 

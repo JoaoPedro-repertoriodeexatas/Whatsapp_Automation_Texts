@@ -1,14 +1,20 @@
 import pg from 'pg';
+import { formatError, logError } from '../services/terminalLogger.js';
 import { env } from './env.js';
 
 const { Pool } = pg;
 
+const commonPoolOptions = {
+  max: env.db.max,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 5_000,
+  query_timeout: 10_000,
+};
+
 const poolConfig = env.db.connectionString
   ? {
       connectionString: env.db.connectionString,
-      max: env.db.max,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 5_000,
+      ...commonPoolOptions,
     }
   : {
       host: env.db.host,
@@ -16,16 +22,14 @@ const poolConfig = env.db.connectionString
       user: env.db.user,
       password: env.db.password,
       database: env.db.database,
-      max: env.db.max,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 5_000,
+      ...commonPoolOptions,
     };
 
 export const pool = new Pool(poolConfig);
 
 // Evita queda do processo caso um cliente ocioso no pool perca a conexão
 pool.on('error', (err) => {
-  console.error('[PostgreSQL] Erro inesperado em cliente ocioso do pool:', err.message);
+  logError('PostgreSQL', `Erro inesperado em cliente ocioso do pool: ${formatError(err)}`);
 });
 
 export async function query(text, params = []) {

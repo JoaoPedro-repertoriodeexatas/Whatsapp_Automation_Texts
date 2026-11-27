@@ -1,9 +1,25 @@
-import { parseEvolutionWebhook } from '../services/evolutionParser.js';
+import {
+  parseConnectionUpdate,
+  parseEvolutionWebhook,
+} from '../services/evolutionParser.js';
 import { saveMessage } from '../services/messageService.js';
-import { logError, logIncomingMessage, logWarn } from '../services/terminalLogger.js';
+import {
+  logError,
+  logIncomingMessage,
+  logInfo,
+  logWarn,
+} from '../services/terminalLogger.js';
 
 async function processWebhookPayload(payload) {
   try {
+    // Loga transições de conexão (open/connecting/close) para acompanhar pareamento no terminal
+    const connUpdate = parseConnectionUpdate(payload);
+    if (connUpdate) {
+      const reason = connUpdate.statusReason != null ? ` (motivo: ${connUpdate.statusReason})` : '';
+      logInfo('Evolution', `[${connUpdate.instancia}] Estado da conexão: ${connUpdate.state}${reason}`);
+      return;
+    }
+
     const messages = parseEvolutionWebhook(payload);
     if (messages.length === 0) {
       return;
